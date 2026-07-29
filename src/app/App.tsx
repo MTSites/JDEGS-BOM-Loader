@@ -288,6 +288,10 @@ for (const pnKey of sortedPns) {
 
   asmRow.getCell(2).fill = newBomheaderFill;
   asmRow.getCell(2).font = specialboldWhite;
+  asmRow.getCell(2).alignment = {
+    horizontal: "center",
+    vertical: "middle",
+  };
 
   // ── BOM headers (start at Column B) ────────────────────
 
