@@ -181,6 +181,7 @@ async function generateOutputExcel(
   ];
 
   const headerFill: ExcelJS.Fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF262626" } };
+  const newBomheaderFill: ExcelJS.Fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFF473B" } };
   const newBomFill: ExcelJS.Fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFF473B" } };
   const newFill:    ExcelJS.Fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFC2A68F" } };
   const labourFill: ExcelJS.Fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE8E5DE" } };
@@ -261,7 +262,7 @@ async function generateOutputExcel(
 
     // Assembly PN label row
     const asmRow = ws.addRow([originalPn]);
-    asmRow.getCell(1).fill = headerFill;
+    asmRow.getCell(1).fill = newBomheaderFill;
     asmRow.getCell(1).font = boldWhite;
 
     // BOM column headers
