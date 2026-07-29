@@ -17,7 +17,7 @@ function figmaAssetResolver() {
 }
 
 export default defineConfig({
-  base: '/JDEGS-BOM-Loader/'
+  base: '/JDEGS-BOM-Loader/',
     
   plugins: [
     figmaAssetResolver(),
