@@ -282,29 +282,32 @@ for (const pnKey of sortedPns) {
     bomFiles.find((bf) => normalizePN(bf.partNumber) === pnKey)?.partNumber ??
     pnKey;
 
-  // ── Assembly PN label row (Column B) ───────────────────
+  // ── Assembly PN + BOM Header Row ─────────────────────────
 
-  const asmRow = ws.addRow(["", originalPn]);
+  const bomHdrRow = ws.addRow([
+    originalPn,
+    ...BOM_HEADERS,
+  ]);
 
-  asmRow.getCell(2).fill = newBomheaderFill;
-  asmRow.getCell(2).font = specialboldWhite;
-  asmRow.getCell(2).alignment = {
-    horizontal: "center",
-    vertical: "middle",
-  };
-
-  // ── BOM headers (start at Column B) ────────────────────
-
-  const bomHdrRow = ws.addRow(["", ...BOM_HEADERS]);
-
+  // Style BOM headers (columns B onward)
   bomHdrRow.font = boldWhite;
   bomHdrRow.fill = headerFill;
+
   bomHdrRow.alignment = {
     wrapText: true,
     vertical: "middle",
   };
 
-  // ── Labour code row (start at Column B) ────────────────
+  // Override column A styling for Assembly PN
+  bomHdrRow.getCell(1).fill = newBomheaderFill;
+  bomHdrRow.getCell(1).font = specialboldWhite;
+
+  bomHdrRow.getCell(1).alignment = {
+    horizontal: "center",
+    vertical: "middle",
+  };
+
+  // ── Labour Row ───────────────────────────────────────────
 
   const lc = labourCodes[fileId];
 
@@ -336,7 +339,7 @@ for (const pnKey of sortedPns) {
     labourRow.fill = labourFill;
   }
 
-  // ── BOM data rows (start at Column B) ──────────────────
+  // ── BOM Data Rows ────────────────────────────────────────
 
   for (const r of rows) {
     const dataRow = ws.addRow([
@@ -347,9 +350,10 @@ for (const pnKey of sortedPns) {
     dataRow.font = baseFont;
   }
 
+  // Blank row between BOMs
   ws.addRow([]);
 }
-
+  
   // ── Dropdowns on new-parts rows ───────────────────────────────────────────
   const dv = (rowNum: number, col: number, formula: string) => {
     ws.getCell(rowNum, col).dataValidation = {
