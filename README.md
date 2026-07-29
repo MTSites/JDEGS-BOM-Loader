@@ -1,7 +1,7 @@
 
-  # BOM File Creation System
+  # BOM Creation System
 
-  This is a code bundle for BOM File Creation System. The original project is available at https://www.figma.com/design/ECO8uz8mYgHzxDEBPCfBQk/BOM-File-Creation-System.
+  This is a code bundle for BOM Creation System. The original project is available at https://www.figma.com/design/ECO8uz8mYgHzxDEBPCfBQk/BOM-Creation-System.
 
   ## Running the code
 
