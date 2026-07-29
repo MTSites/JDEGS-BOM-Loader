@@ -241,53 +241,110 @@ async function generateOutputExcel(
   ws.addRow([]);
   ws.addRow([]);
 
-  // ── Section 2: BOM blocks sorted ascending by PN ─────────────────────────
-  const bomMap = new Map<string, { rows: BomRow[]; fileId: string }>();
-  for (const result of results) {
-    const bf = bomFiles.find((f) => normalizePN(f.partNumber) === normalizePN(result.assemblyPn));
-    bomMap.set(normalizePN(result.assemblyPn), { rows: result.bomRows, fileId: bf?.id ?? "" });
-  }
-  for (const bf of bomFiles) {
-    const key = normalizePN(bf.partNumber);
-    if (!bomMap.has(key)) bomMap.set(key, { rows: bf.rows, fileId: bf.id });
-  }
+// ── Section 2: BOM blocks sorted ascending by PN ─────────────────────────
 
-  const sortedPns = [...bomMap.keys()].sort((a, b) =>
-    a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" })
+const bomMap = new Map<string, { rows: BomRow[]; fileId: string }>();
+
+for (const result of results) {
+  const bf = bomFiles.find(
+    (f) => normalizePN(f.partNumber) === normalizePN(result.assemblyPn)
   );
 
-  for (const pnKey of sortedPns) {
-    const { rows, fileId } = bomMap.get(pnKey)!;
-    const originalPn = results.find((r) => normalizePN(r.assemblyPn) === pnKey)?.assemblyPn
-      ?? bomFiles.find((bf) => normalizePN(bf.partNumber) === pnKey)?.partNumber
-      ?? pnKey;
+  bomMap.set(normalizePN(result.assemblyPn), {
+    rows: result.bomRows,
+    fileId: bf?.id ?? "",
+  });
+}
 
-    // Assembly PN label row
-    const asmRow = ws.addRow([originalPn]);
-    asmRow.getCell(1).fill = newBomheaderFill;
-    asmRow.getCell(1).font = specialboldWhite;
+for (const bf of bomFiles) {
+  const key = normalizePN(bf.partNumber);
 
-    // BOM column headers
-    const bomHdrRow = ws.addRow(BOM_HEADERS);
-    bomHdrRow.font = boldWhite;
-    bomHdrRow.fill = headerFill;
-    bomHdrRow.alignment = { wrapText: true, vertical: "middle" };
-
-    // Labour code row (if set for this BOM)
-    const lc = labourCodes[fileId];
-    if (lc?.code) {
-      const labourDesc: Record<string, string> = { MT060: "MACHINE SHOP", MT080: "BOILERMAKING", MT100: "ELECTRICAL" };
-      const labourRow = ws.addRow([lc.code, labourDesc[lc.code] ?? "", "", lc.code, lc.qty || "", "", "", "", "", "", "", "", ""]);
-      labourRow.font = boldDark;
-      labourRow.fill = labourFill;
-    }
-
-    for (const r of rows) {
-      const dataRow = ws.addRow(rowToBomArr(r));
-      dataRow.font = baseFont;
-    }
-    ws.addRow([]);
+  if (!bomMap.has(key)) {
+    bomMap.set(key, {
+      rows: bf.rows,
+      fileId: bf.id,
+    });
   }
+}
+
+const sortedPns = [...bomMap.keys()].sort((a, b) =>
+  a.localeCompare(b, undefined, {
+    numeric: true,
+    sensitivity: "base",
+  })
+);
+
+for (const pnKey of sortedPns) {
+  const { rows, fileId } = bomMap.get(pnKey)!;
+
+  const originalPn =
+    results.find((r) => normalizePN(r.assemblyPn) === pnKey)?.assemblyPn ??
+    bomFiles.find((bf) => normalizePN(bf.partNumber) === pnKey)?.partNumber ??
+    pnKey;
+
+  // ── Assembly PN label row (Column B) ───────────────────
+
+  const asmRow = ws.addRow(["", originalPn]);
+
+  asmRow.getCell(2).fill = newBomheaderFill;
+  asmRow.getCell(2).font = specialboldWhite;
+
+  // ── BOM headers (start at Column B) ────────────────────
+
+  const bomHdrRow = ws.addRow(["", ...BOM_HEADERS]);
+
+  bomHdrRow.font = boldWhite;
+  bomHdrRow.fill = headerFill;
+  bomHdrRow.alignment = {
+    wrapText: true,
+    vertical: "middle",
+  };
+
+  // ── Labour code row (start at Column B) ────────────────
+
+  const lc = labourCodes[fileId];
+
+  if (lc?.code) {
+    const labourDesc: Record<string, string> = {
+      MT060: "MACHINE SHOP",
+      MT080: "BOILERMAKING",
+      MT100: "ELECTRICAL",
+    };
+
+    const labourRow = ws.addRow([
+      "",
+      lc.code,
+      labourDesc[lc.code] ?? "",
+      "",
+      lc.code,
+      lc.qty || "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+    ]);
+
+    labourRow.font = boldDark;
+    labourRow.fill = labourFill;
+  }
+
+  // ── BOM data rows (start at Column B) ──────────────────
+
+  for (const r of rows) {
+    const dataRow = ws.addRow([
+      "",
+      ...rowToBomArr(r),
+    ]);
+
+    dataRow.font = baseFont;
+  }
+
+  ws.addRow([]);
+}
 
   // ── Dropdowns on new-parts rows ───────────────────────────────────────────
   const dv = (rowNum: number, col: number, formula: string) => {
