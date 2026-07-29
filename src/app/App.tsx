@@ -186,7 +186,7 @@ async function generateOutputExcel(
   const newFill:    ExcelJS.Fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFC2A68F" } };
   const labourFill: ExcelJS.Fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE8E5DE" } };
   const boldWhite: Partial<ExcelJS.Font> = { bold: true, size: 10, color: { argb: "FFFFFFFF" } };
-  const specialboldWhite: Partial<ExcelJS.Font> = { bold: true, size: 14, color: { argb: "FFFFFFFF" } };
+  const specialboldWhite: Partial<ExcelJS.Font> = { bold: true, size: 12, color: { argb: "FFFFFFFF" } };
   const boldDark:  Partial<ExcelJS.Font> = { bold: true, size: 10 };
   const baseFont:  Partial<ExcelJS.Font> = { size: 10 };
   
