@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef } from "react";
 import * as XLSX from "xlsx";
-import { Upload, FileSpreadsheet, Database, Download, X, AlertTriangle, CheckCircle, ChevronDown, ChevronRight, Trash2 } from "lucide-react";
+import ExcelJS from "exceljs";
+import { Upload, FileSpreadsheet, Database, Download, X, AlertTriangle, CheckCircle, ChevronDown, ChevronRight, Trash2, Plus } from "lucide-react";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -8,7 +9,6 @@ interface BomRow {
   partNo: string;
   desc1: string;
   desc2: string;
-  drawingRef: string;
   qty: string | number;
   pOrM: string;
   cost: string | number;
@@ -28,6 +28,11 @@ interface BomFile {
   rows: BomRow[];
 }
 
+interface LabourCode {
+  code: string; // "" | "MT080" | "MT100" | "MT060"
+  qty: string;
+}
+
 interface ProcessedPart extends BomRow {
   isNew: boolean;
   hasOwnBom: boolean;
@@ -35,6 +40,7 @@ interface ProcessedPart extends BomRow {
 
 interface AssemblyResult {
   assemblyPn: string;
+  assemblyIsNew: boolean; // the assembly PN itself not in JDGEs
   newParts: ProcessedPart[];
   allParts: ProcessedPart[];
   bomRows: BomRow[];
@@ -55,7 +61,6 @@ function parseSheetToRows(ws: XLSX.WorkSheet): BomRow[] {
   const raw = XLSX.utils.sheet_to_json<(string | number)[]>(ws, { header: 1, defval: "" });
   if (raw.length < 2) return [];
 
-  // Find header row
   let headerRowIdx = 0;
   for (let i = 0; i < Math.min(10, raw.length); i++) {
     const nonEmpty = (raw[i] as (string | number)[]).filter((c) => String(c).trim() !== "").length;
@@ -67,9 +72,8 @@ function parseSheetToRows(ws: XLSX.WorkSheet): BomRow[] {
   const colPN   = findCol(headers, ["partno", "partnum", "part", "pn", "item", "number", "code"]);
   const colD1   = findCol(headers, ["description1", "desc1", "description"]);
   const colD2   = findCol(headers, ["description2", "desc2"]);
-  const colDRef = findCol(headers, ["drawingref", "drawref", "drawing", "dwg", "ref"]);
   const colQty  = findCol(headers, ["qty", "quantity", "qnty"]);
-  const colPoM  = findCol(headers, ["porm", "porm", "pm"]);
+  const colPoM  = findCol(headers, ["porm", "pm"]);
   const colCost = findCol(headers, ["updatecost", "cost", "price"]);
   const colSup  = findCol(headers, ["supplier", "vendor"]);
   const colLT   = findCol(headers, ["leadtime", "lead", "weeks", "lt"]);
@@ -79,8 +83,7 @@ function parseSheetToRows(ws: XLSX.WorkSheet): BomRow[] {
   const colUnit = findCol(headers, ["unit", "uom"]);
   const colBr   = findCol(headers, ["branch", "br"]);
 
-  const get = (row: (string | number)[], idx: number): string =>
-    idx >= 0 ? String(row[idx] ?? "").trim() : "";
+  const get    = (row: (string | number)[], idx: number): string => idx >= 0 ? String(row[idx] ?? "").trim() : "";
   const getNum = (row: (string | number)[], idx: number): string | number => {
     if (idx < 0) return "";
     const v = row[idx];
@@ -94,9 +97,8 @@ function parseSheetToRows(ws: XLSX.WorkSheet): BomRow[] {
     if (!pn) continue;
     rows.push({
       partNo: pn,
-      desc1: get(r, colD1) || (colD1 < 0 && colPN >= 0 ? "" : ""),
+      desc1: get(r, colD1),
       desc2: get(r, colD2),
-      drawingRef: get(r, colDRef),
       qty: getNum(r, colQty),
       pOrM: get(r, colPoM),
       cost: getNum(r, colCost),
@@ -115,13 +117,14 @@ function parseSheetToRows(ws: XLSX.WorkSheet): BomRow[] {
 async function readFile(file: File): Promise<XLSX.WorkBook> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = (e) => {
-      const wb = XLSX.read(e.target?.result, { type: "array" });
-      resolve(wb);
-    };
+    reader.onload = (e) => { resolve(XLSX.read(e.target?.result, { type: "array" })); };
     reader.onerror = reject;
     reader.readAsArrayBuffer(file);
   });
+}
+
+function normalizePN(pn: string): string {
+  return pn.trim().toUpperCase().replace(/\s+/g, "");
 }
 
 // ─── Excel generation ─────────────────────────────────────────────────────────
@@ -138,10 +141,11 @@ const BOM_HEADERS = [
   "Master Planning\nFamily", "Comms\nClass", "Sub Class", "Unit", "Branch",
 ];
 
+// Drawing Ref always mirrors Part No. per spec
 function rowToNewPartsArr(p: ProcessedPart): (string | number)[] {
   return [
-    p.hasOwnBom ? "NEW Part / BOM" : "NEW Part",
-    p.partNo, p.desc1, p.desc2, p.drawingRef,
+    p.hasOwnBom ? "NEW BOM" : "NEW Part",
+    p.partNo, p.desc1, p.desc2, p.partNo, // drawingRef = partNo
     p.pOrM, p.cost, p.supplier, p.leadTime,
     p.masterPlanningFamily, p.commsClass, p.subClass, p.unit, p.branch,
   ];
@@ -149,78 +153,163 @@ function rowToNewPartsArr(p: ProcessedPart): (string | number)[] {
 
 function rowToBomArr(r: BomRow): (string | number)[] {
   return [
-    r.partNo, r.desc1, r.desc2, r.drawingRef,
+    r.partNo, r.desc1, r.desc2, r.partNo, // drawingRef = partNo
     r.qty, r.cost, r.supplier, r.leadTime,
     r.masterPlanningFamily, r.commsClass, r.subClass, r.unit, r.branch,
   ];
 }
 
-function generateOutputExcel(results: AssemblyResult[], bomFiles: BomFile[]): void {
-  const wb = XLSX.utils.book_new();
-  const data: (string | number)[][] = [];
-  const EMPTY = new Array(14).fill("");
+// Column indices (1-based) in the new-parts section
+const COL_POM = 6;
+const COL_MPF = 10;
+const COL_CC  = 11;
+const COL_SC  = 12;
 
-  // ── Section 1: all new parts across every assembly, deduplicated ──
+async function generateOutputExcel(
+  results: AssemblyResult[],
+  bomFiles: BomFile[],
+  labourCodes: Record<string, LabourCode>,
+  outputFileName: string,
+): Promise<void> {
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet("JDGEs Load");
+
+  ws.columns = [
+    { width: 16 }, { width: 14 }, { width: 32 }, { width: 22 }, { width: 14 },
+    { width: 8  }, { width: 10 }, { width: 26 }, { width: 10 },
+    { width: 18 }, { width: 10 }, { width: 12 }, { width: 6  }, { width: 8  },
+  ];
+
+  const headerFill: ExcelJS.Fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF262626" } };
+  const newBomFill: ExcelJS.Fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFF473B" } };
+  const newFill:    ExcelJS.Fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFC2A68F" } };
+  const labourFill: ExcelJS.Fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE8E5DE" } };
+  const boldWhite: Partial<ExcelJS.Font> = { bold: true, size: 10, color: { argb: "FFFFFFFF" } };
+  const boldDark:  Partial<ExcelJS.Font> = { bold: true, size: 10 };
+  const baseFont:  Partial<ExcelJS.Font> = { size: 10 };
+
+  const newPartDataRows: number[] = [];
+
+  // ── Section 1: all new parts (assembly PNs + their contents), deduplicated ──
   const seenNew = new Set<string>();
   const allNewParts: ProcessedPart[] = [];
+
   for (const result of results) {
+    // Check the assembly PN itself first
+    if (result.assemblyIsNew) {
+      const key = normalizePN(result.assemblyPn);
+      if (!seenNew.has(key)) {
+        seenNew.add(key);
+        allNewParts.push({
+          partNo: result.assemblyPn,
+          desc1: "", desc2: "", qty: "", pOrM: "", cost: "",
+          supplier: "", leadTime: "", masterPlanningFamily: "",
+          commsClass: "", subClass: "", unit: "", branch: "",
+          isNew: true,
+          hasOwnBom: true,
+        });
+      }
+    }
+    // Then parts inside the BOM
     for (const p of result.newParts) {
       const key = normalizePN(p.partNo);
       if (!seenNew.has(key)) { seenNew.add(key); allNewParts.push(p); }
     }
   }
 
-  data.push(NEW_PARTS_HEADERS);
+  const hdrRow = ws.addRow(NEW_PARTS_HEADERS);
+  hdrRow.font = boldWhite;
+  hdrRow.fill = headerFill;
+  hdrRow.alignment = { wrapText: true, vertical: "middle" };
+
   if (allNewParts.length === 0) {
-    data.push(["(all parts already in JDGEs)", ...new Array(13).fill("")]);
+    const noRow = ws.addRow(["(all parts already in JDGEs)"]);
+    noRow.font = baseFont;
   } else {
-    for (const p of allNewParts) data.push(rowToNewPartsArr(p));
+    for (const p of allNewParts) {
+      const r = ws.addRow(rowToNewPartsArr(p));
+      r.font = baseFont;
+      r.getCell(1).fill = p.hasOwnBom ? newBomFill : newFill;
+      r.getCell(1).font = boldWhite;
+      newPartDataRows.push(r.number);
+    }
   }
 
-  data.push(EMPTY);
-  data.push(EMPTY);
+  ws.addRow([]);
+  ws.addRow([]);
 
-  // ── Section 2: all BOM blocks sorted ascending by assembly PN ──
-  // Collect all unique assemblies that have a BOM (top-level results + any sub-assembly BOM files)
-  const bomMap = new Map<string, BomRow[]>();
+  // ── Section 2: BOM blocks sorted ascending by PN ─────────────────────────
+  const bomMap = new Map<string, { rows: BomRow[]; fileId: string }>();
   for (const result of results) {
-    bomMap.set(normalizePN(result.assemblyPn), result.bomRows);
+    const bf = bomFiles.find((f) => normalizePN(f.partNumber) === normalizePN(result.assemblyPn));
+    bomMap.set(normalizePN(result.assemblyPn), { rows: result.bomRows, fileId: bf?.id ?? "" });
   }
-  // Also include BOM files that weren't a top-level result (pure sub-assemblies)
   for (const bf of bomFiles) {
     const key = normalizePN(bf.partNumber);
-    if (!bomMap.has(key)) bomMap.set(key, bf.rows);
+    if (!bomMap.has(key)) bomMap.set(key, { rows: bf.rows, fileId: bf.id });
   }
 
-  const sortedPns = [...bomMap.keys()].sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }));
+  const sortedPns = [...bomMap.keys()].sort((a, b) =>
+    a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" })
+  );
 
   for (const pnKey of sortedPns) {
-    const rows = bomMap.get(pnKey)!;
-    // Find the display PN (original casing)
+    const { rows, fileId } = bomMap.get(pnKey)!;
     const originalPn = results.find((r) => normalizePN(r.assemblyPn) === pnKey)?.assemblyPn
       ?? bomFiles.find((bf) => normalizePN(bf.partNumber) === pnKey)?.partNumber
       ?? pnKey;
 
-    data.push([originalPn, ...new Array(13).fill("")]);
-    data.push(BOM_HEADERS);
-    for (const r of rows) data.push(rowToBomArr(r));
-    data.push(EMPTY);
+    // Assembly PN label row
+    const asmRow = ws.addRow([originalPn]);
+    asmRow.getCell(1).fill = headerFill;
+    asmRow.getCell(1).font = boldWhite;
+
+    // BOM column headers
+    const bomHdrRow = ws.addRow(BOM_HEADERS);
+    bomHdrRow.font = boldWhite;
+    bomHdrRow.fill = headerFill;
+    bomHdrRow.alignment = { wrapText: true, vertical: "middle" };
+
+    // Labour code row (if set for this BOM)
+    const lc = labourCodes[fileId];
+    if (lc?.code) {
+      const labourDesc: Record<string, string> = { MT060: "MACHINE SHOP", MT080: "BOILERMAKING", MT100: "ELECTRICAL" };
+      const labourRow = ws.addRow([lc.code, labourDesc[lc.code] ?? "", "", lc.code, lc.qty || "", "", "", "", "", "", "", "", ""]);
+      labourRow.font = boldDark;
+      labourRow.fill = labourFill;
+    }
+
+    for (const r of rows) {
+      const dataRow = ws.addRow(rowToBomArr(r));
+      dataRow.font = baseFont;
+    }
+    ws.addRow([]);
   }
 
-  const ws = XLSX.utils.aoa_to_sheet(data);
-  ws["!cols"] = [
-    { wch: 16 }, { wch: 14 }, { wch: 30 }, { wch: 20 }, { wch: 14 },
-    { wch: 8 }, { wch: 10 }, { wch: 24 }, { wch: 10 },
-    { wch: 14 }, { wch: 8 }, { wch: 10 }, { wch: 6 }, { wch: 8 },
-  ];
+  // ── Dropdowns on new-parts rows ───────────────────────────────────────────
+  const dv = (rowNum: number, col: number, formula: string) => {
+    ws.getCell(rowNum, col).dataValidation = {
+      type: "list", allowBlank: true, formulae: [formula],
+      showErrorMessage: true, errorStyle: "warning",
+    };
+  };
+  for (const rowNum of newPartDataRows) {
+    dv(rowNum, COL_POM, '"P,M"');
+    dv(rowNum, COL_MPF, '"ASS"');
+    dv(rowNum, COL_CC,  '"MSC"');
+    dv(rowNum, COL_SC,  '"REQ,EHT,ELO,KEL,FLF"');
+  }
 
-  XLSX.utils.book_append_sheet(wb, ws, "JDGEs Load");
-
-  XLSX.writeFile(wb, "JDGEs_BOM_Load.xlsx");
-}
-
-function normalizePN(pn: string): string {
-  return pn.trim().toUpperCase().replace(/\s+/g, "");
+  // ── Write file ────────────────────────────────────────────────────────────
+  const buffer = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  const safeName = (outputFileName.trim() || "JDGEs_BOM_Load").replace(/\.xlsx$/i, "");
+  a.download = `${safeName}.xlsx`;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 // ─── Drop Zone ────────────────────────────────────────────────────────────────
@@ -237,8 +326,8 @@ function DropZone({ label, accept, multiple, onFiles, fileCount, hint }: {
       onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
       onDragLeave={() => setDragging(false)}
       onDrop={(e) => { e.preventDefault(); setDragging(false); onFiles(Array.from(e.dataTransfer.files)); }}
-      className={`relative cursor-pointer border-2 border-dashed p-6 flex flex-col items-center gap-2 select-none transition-colors
-        ${dragging ? "border-accent bg-accent/5" : "border-border hover:border-foreground/40"}`}
+      className={`relative cursor-pointer border-2 border-dashed p-5 flex flex-col items-center gap-2 select-none transition-colors
+        ${dragging ? "border-[#ff473b] bg-[#ff473b]/5" : "border-border hover:border-foreground/40"}`}
     >
       <input ref={inputRef} type="file" accept={accept} multiple={multiple} className="hidden"
         onChange={(e) => { onFiles(Array.from(e.target.files ?? [])); e.target.value = ""; }} />
@@ -248,7 +337,7 @@ function DropZone({ label, accept, multiple, onFiles, fileCount, hint }: {
         {hint && <p className="text-xs text-muted-foreground mt-0.5">{hint}</p>}
       </div>
       {fileCount > 0 && (
-        <span className="absolute top-2 right-2 bg-accent text-accent-foreground text-xs font-mono px-1.5 py-0.5">
+        <span className="absolute top-2 right-2 bg-[#ff473b] text-white text-xs font-mono px-1.5 py-0.5">
           {fileCount} file{fileCount !== 1 ? "s" : ""}
         </span>
       )}
@@ -260,10 +349,63 @@ function FileTag({ name, onRemove }: { name: string; onRemove: () => void }) {
   return (
     <div className="flex items-center gap-1.5 bg-secondary border border-border px-2 py-1 text-xs font-mono">
       <FileSpreadsheet className="w-3 h-3 text-muted-foreground shrink-0" />
-      <span className="truncate max-w-[180px]">{name}</span>
-      <button onClick={(e) => { e.stopPropagation(); onRemove(); }} className="ml-auto text-muted-foreground hover:text-destructive transition-colors shrink-0">
+      <span className="truncate max-w-[200px]">{name}</span>
+      <button onClick={(e) => { e.stopPropagation(); onRemove(); }}
+        className="ml-auto text-muted-foreground hover:text-[#ff473b] transition-colors shrink-0">
         <X className="w-3 h-3" />
       </button>
+    </div>
+  );
+}
+
+// ─── Labour Code Panel ────────────────────────────────────────────────────────
+
+const LABOUR_OPTIONS = ["", "MT080", "MT100", "MT060"] as const;
+
+function LabourCodePanel({ bomFiles, labourCodes, onChange }: {
+  bomFiles: BomFile[];
+  labourCodes: Record<string, LabourCode>;
+  onChange: (fileId: string, lc: LabourCode) => void;
+}) {
+  if (bomFiles.length === 0) return null;
+  return (
+    <div className="border border-border">
+      <div className="px-3 py-2 bg-secondary border-b border-border flex items-center gap-2">
+        <Plus className="w-3.5 h-3.5 text-muted-foreground" />
+        <span className="text-xs font-bold uppercase tracking-wider">Labour Code per BOM</span>
+        <span className="text-xs text-muted-foreground ml-1">(optional — adds a row at the top of each BOM)</span>
+      </div>
+      <div className="divide-y divide-border">
+        {bomFiles.map((bf) => {
+          const lc = labourCodes[bf.id] ?? { code: "", qty: "" };
+          return (
+            <div key={bf.id} className="flex items-center gap-3 px-3 py-2">
+              <span className="font-mono text-xs font-semibold w-[130px] shrink-0 truncate">{bf.partNumber}</span>
+              <select
+                value={lc.code}
+                onChange={(e) => onChange(bf.id, { ...lc, code: e.target.value })}
+                className="text-xs font-mono border border-border bg-background px-2 py-1 focus:outline-none focus:border-[#ff473b]"
+              >
+                {LABOUR_OPTIONS.map((o) => (
+                  <option key={o} value={o}>{o || "— none —"}</option>
+                ))}
+              </select>
+              {lc.code && (
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs text-muted-foreground">Qty</span>
+                  <input
+                    type="text"
+                    value={lc.qty}
+                    onChange={(e) => onChange(bf.id, { ...lc, qty: e.target.value })}
+                    placeholder="e.g. 30"
+                    className="text-xs font-mono border border-border bg-background px-2 py-1 w-16 focus:outline-none focus:border-[#ff473b]"
+                  />
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -274,10 +416,10 @@ const NEW_PARTS_COLS = ["Part No.", "Description 1", "Description 2", "Drawing R
 const BOM_COLS       = ["Part No.", "Description 1", "Description 2", "Drawing Ref", "Qty", "Update Cost", "Supplier", "Lead-Time", "Mst.Plan.Family", "Comms Class", "Sub Class", "Unit", "Branch"];
 
 function partToRow(p: ProcessedPart): (string | number)[] {
-  return [p.partNo, p.desc1, p.desc2, p.drawingRef, p.pOrM, p.cost, p.supplier, p.leadTime, p.masterPlanningFamily, p.commsClass, p.subClass, p.unit, p.branch];
+  return [p.partNo, p.desc1, p.desc2, p.partNo, p.pOrM, p.cost, p.supplier, p.leadTime, p.masterPlanningFamily, p.commsClass, p.subClass, p.unit, p.branch];
 }
 function bomToRow(r: BomRow): (string | number)[] {
-  return [r.partNo, r.desc1, r.desc2, r.drawingRef, r.qty, r.cost, r.supplier, r.leadTime, r.masterPlanningFamily, r.commsClass, r.subClass, r.unit, r.branch];
+  return [r.partNo, r.desc1, r.desc2, r.partNo, r.qty, r.cost, r.supplier, r.leadTime, r.masterPlanningFamily, r.commsClass, r.subClass, r.unit, r.branch];
 }
 
 function DataTable({ cols, rows, renderLabel }: {
@@ -325,15 +467,16 @@ function ResultsSection({ result, expanded, onToggle }: {
     <div className="border border-border mb-0">
       <button onClick={onToggle}
         className="w-full flex items-center justify-between px-4 py-3 bg-secondary hover:bg-muted transition-colors text-left">
-        <div className="flex items-center gap-3">
-          {expanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+        <div className="flex items-center gap-3 min-w-0">
+          {expanded ? <ChevronDown className="w-4 h-4 shrink-0" /> : <ChevronRight className="w-4 h-4 shrink-0" />}
           <span className="font-mono font-bold text-sm">{result.assemblyPn}</span>
-          <span className="text-xs text-muted-foreground">{result.bomRows.length} BOM lines</span>
+          <span className="text-xs text-muted-foreground shrink-0">{result.bomRows.length} lines</span>
         </div>
-        <div className="flex items-center gap-3">
-          {result.newParts.length > 0 ? (
-            <span className="flex items-center gap-1 text-xs font-mono text-accent font-bold">
-              <AlertTriangle className="w-3.5 h-3.5" />{result.newParts.length} new
+        <div className="flex items-center gap-3 shrink-0 ml-2">
+          {result.newParts.length > 0 || result.assemblyIsNew ? (
+            <span className="flex items-center gap-1 text-xs font-mono text-[#ff473b] font-bold">
+              <AlertTriangle className="w-3.5 h-3.5" />
+              {result.newParts.length + (result.assemblyIsNew ? 1 : 0)} new
             </span>
           ) : (
             <span className="flex items-center gap-1 text-xs font-mono text-green-700 font-bold">
@@ -349,8 +492,10 @@ function ResultsSection({ result, expanded, onToggle }: {
             {(["new", "bom"] as const).map((t) => (
               <button key={t} onClick={() => setTab(t)}
                 className={`px-4 py-2 text-xs font-bold uppercase tracking-wider transition-colors
-                  ${tab === t ? "bg-foreground text-primary-foreground" : "text-muted-foreground hover:text-foreground"}`}>
-                {t === "new" ? `New Parts (${result.newParts.length})` : `Full BOM (${result.bomRows.length})`}
+                  ${tab === t ? "bg-[#262626] text-white" : "text-muted-foreground hover:text-foreground"}`}>
+                {t === "new"
+                  ? `New Parts (${result.newParts.length + (result.assemblyIsNew ? 1 : 0)})`
+                  : `Full BOM (${result.bomRows.length})`}
               </button>
             ))}
           </div>
@@ -358,12 +503,24 @@ function ResultsSection({ result, expanded, onToggle }: {
           {tab === "new" && (
             <DataTable
               cols={NEW_PARTS_COLS}
-              rows={result.newParts.map((p) => partToRow(p))}
+              rows={[
+                ...(result.assemblyIsNew ? [{
+                  partNo: result.assemblyPn, desc1: "", desc2: "", qty: "", pOrM: "",
+                  cost: "", supplier: "", leadTime: "", masterPlanningFamily: "",
+                  commsClass: "", subClass: "", unit: "", branch: "",
+                  isNew: true, hasOwnBom: true,
+                } as ProcessedPart] : []),
+                ...result.newParts,
+              ].map((p) => partToRow(p))}
               renderLabel={(i) => {
-                const p = result.newParts[i];
+                const parts = [
+                  ...(result.assemblyIsNew ? [{ hasOwnBom: true }] : []),
+                  ...result.newParts,
+                ];
+                const p = parts[i];
                 return p.hasOwnBom
-                  ? <span className="bg-yellow-300 text-black px-1 py-0.5 font-bold text-[10px] whitespace-nowrap">NEW Part / BOM</span>
-                  : <span className="bg-yellow-200 text-black px-1 py-0.5 font-bold text-[10px] whitespace-nowrap">NEW Part</span>;
+                  ? <span className="bg-[#ff473b] text-white px-1 py-0.5 font-bold text-[10px] whitespace-nowrap">NEW BOM</span>
+                  : <span className="bg-[#c2a68f] text-white px-1 py-0.5 font-bold text-[10px] whitespace-nowrap">NEW Part</span>;
               }}
             />
           )}
@@ -388,6 +545,8 @@ export default function App() {
   const [results, setResults] = useState<AssemblyResult[]>([]);
   const [expandedAssemblies, setExpandedAssemblies] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
+  const [labourCodes, setLabourCodes] = useState<Record<string, LabourCode>>({});
+  const [outputFileName, setOutputFileName] = useState("JDGEs_BOM_Load");
 
   const handleBomFiles = useCallback(async (files: File[]) => {
     setError(null);
@@ -440,13 +599,18 @@ export default function App() {
       try {
         const bomPns = new Set(bomFiles.map((bf) => normalizePN(bf.partNumber)));
         const newResults: AssemblyResult[] = bomFiles.map((bf) => {
+          // Check the assembly PN itself
+          const assemblyIsNew = !jdgesPartNumbers.has(normalizePN(bf.partNumber));
+
           const allParts: ProcessedPart[] = bf.rows.map((row) => ({
             ...row,
             isNew: !jdgesPartNumbers.has(normalizePN(row.partNo)),
             hasOwnBom: bomPns.has(normalizePN(row.partNo)),
           }));
+
           return {
             assemblyPn: bf.partNumber,
+            assemblyIsNew,
             newParts: allParts.filter((p) => p.isNew),
             allParts,
             bomRows: bf.rows,
@@ -462,19 +626,29 @@ export default function App() {
     }, 50);
   }, [bomFiles, jdgesLoaded, jdgesPartNumbers]);
 
-  const totalNew = results.reduce((s, r) => s + r.newParts.length, 0);
+  const handleReset = useCallback(() => {
+    setBomFiles([]); setJdgesFile(null); setJdgesLoaded(false);
+    setJdgesPartNumbers(new Set()); setJdgesCount(0);
+    setResults([]); setError(null); setLabourCodes({});
+    setOutputFileName("JDGEs_BOM_Load");
+  }, []);
+
+  const totalNew = results.reduce((s, r) => s + r.newParts.length + (r.assemblyIsNew ? 1 : 0), 0);
   const totalParts = results.reduce((s, r) => s + r.bomRows.length, 0);
 
   return (
     <div className="min-h-screen bg-background font-[Inter,system-ui,sans-serif]">
-      <header className="border-b-2 border-foreground bg-foreground text-primary-foreground">
+      <header className="border-b-2 border-[#262626] bg-[#262626] text-white">
         <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
-          <div>
-            <h1 className="text-lg font-black tracking-tight uppercase">JDGEs BOM Loader</h1>
-            <p className="text-xs text-primary-foreground/60 font-mono mt-0.5">Bill of Materials cross-reference &amp; file generator</p>
+          <div className="flex items-center gap-3">
+            <span className="inline-block w-2.5 h-2.5 rounded-full bg-[#ff473b]" />
+            <div>
+              <h1 className="text-lg font-black tracking-tight uppercase">JDGEs BOM Loader</h1>
+              <p className="text-xs text-white/50 font-mono mt-0.5">Bill of Materials cross-reference &amp; file generator</p>
+            </div>
           </div>
-          <div className="text-xs font-mono text-primary-foreground/50 text-right hidden sm:block">
-            <div>Upload BOMs + JDGEs dump → Generate</div>
+          <div className="text-xs font-mono text-white/40 text-right hidden sm:block">
+            Upload BOMs + JDGEs dump → Generate
           </div>
         </div>
       </header>
@@ -482,12 +656,13 @@ export default function App() {
       <main className="max-w-6xl mx-auto px-6 py-8">
         <div className="grid grid-cols-1 lg:grid-cols-[1fr_300px] gap-8">
 
-          <div className="space-y-6">
+          <div className="space-y-5">
+
+            {/* Steps 01 + 02 */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              {/* BOM files */}
               <div>
                 <div className="flex items-center gap-2 mb-2">
-                  <span className="bg-foreground text-primary-foreground text-xs font-mono font-bold px-1.5 py-0.5">01</span>
+                  <span className="bg-[#ff473b] text-white text-xs font-mono font-bold px-1.5 py-0.5">01</span>
                   <h2 className="text-sm font-bold uppercase tracking-wider">BOM Spreadsheets</h2>
                 </div>
                 <p className="text-xs text-muted-foreground mb-3">
@@ -505,14 +680,13 @@ export default function App() {
                 )}
               </div>
 
-              {/* JDGEs DB */}
               <div>
                 <div className="flex items-center gap-2 mb-2">
-                  <span className="bg-foreground text-primary-foreground text-xs font-mono font-bold px-1.5 py-0.5">02</span>
+                  <span className="bg-[#ff473b] text-white text-xs font-mono font-bold px-1.5 py-0.5">02</span>
                   <h2 className="text-sm font-bold uppercase tracking-wider">JDGEs Database</h2>
                 </div>
                 <p className="text-xs text-muted-foreground mb-3">
-                  Export all part numbers from JDGEs. All values in the file are scanned for matching part numbers.
+                  Export all part numbers from JDGEs. The entire file is scanned — every cell is checked against your BOMs.
                 </p>
                 <DropZone label="Drop JDGEs database dump" hint=".xlsx / .xls / .csv export from JDGEs"
                   accept=".xlsx,.xls,.csv" multiple={false} onFiles={handleJdgesFile} fileCount={jdgesFile ? 1 : 0} />
@@ -526,42 +700,65 @@ export default function App() {
               </div>
             </div>
 
+            {/* Labour codes */}
+            {bomFiles.length > 0 && (
+              <LabourCodePanel
+                bomFiles={bomFiles}
+                labourCodes={labourCodes}
+                onChange={(id, lc) => setLabourCodes((prev) => ({ ...prev, [id]: lc }))}
+              />
+            )}
+
             {error && (
-              <div className="flex items-center gap-2 bg-destructive/10 border border-destructive text-destructive px-4 py-2 text-sm font-mono">
+              <div className="flex items-center gap-2 bg-destructive/10 border border-[#ff473b] text-[#ff473b] px-4 py-2 text-sm font-mono">
                 <AlertTriangle className="w-4 h-4 shrink-0" />{error}
               </div>
             )}
 
-            <div className="flex items-center gap-4 flex-wrap">
+            {/* Actions row */}
+            <div className="flex items-center gap-3 flex-wrap">
               <button onClick={handleProcess}
                 disabled={processing || bomFiles.length === 0 || !jdgesLoaded}
-                className="bg-foreground text-primary-foreground font-bold uppercase tracking-wider text-sm px-6 py-2.5
-                  hover:bg-accent hover:text-accent-foreground transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
+                className="bg-[#262626] text-white font-bold uppercase tracking-wider text-sm px-6 py-2.5
+                  hover:bg-[#ff473b] transition-colors disabled:opacity-40 disabled:cursor-not-allowed">
                 {processing ? "Processing…" : "03 — Cross-Check"}
               </button>
+
               {results.length > 0 && (
-                <button onClick={() => generateOutputExcel(results, bomFiles)}
-                  className="flex items-center gap-2 bg-accent text-accent-foreground font-bold uppercase tracking-wider text-sm px-6 py-2.5
-                    hover:bg-foreground hover:text-primary-foreground transition-colors">
-                  <Download className="w-4 h-4" />04 — Generate Excel
-                </button>
+                <div className="flex items-center gap-2">
+                  <div className="flex items-center border border-border bg-background">
+                    <span className="text-xs font-mono text-muted-foreground px-2 border-r border-border">filename</span>
+                    <input
+                      type="text"
+                      value={outputFileName}
+                      onChange={(e) => setOutputFileName(e.target.value)}
+                      className="text-xs font-mono px-2 py-2.5 w-44 focus:outline-none bg-transparent"
+                      placeholder="JDGEs_BOM_Load"
+                    />
+                    <span className="text-xs font-mono text-muted-foreground px-2 border-l border-border">.xlsx</span>
+                  </div>
+                  <button onClick={() => generateOutputExcel(results, bomFiles, labourCodes, outputFileName)}
+                    className="flex items-center gap-2 bg-[#ff473b] text-white font-bold uppercase tracking-wider text-sm px-5 py-2.5
+                      hover:bg-[#262626] transition-colors">
+                    <Download className="w-4 h-4" />04 — Generate
+                  </button>
+                </div>
               )}
             </div>
 
+            {/* Results */}
             {results.length > 0 && (
               <div>
                 <div className="flex items-center gap-3 mb-3 flex-wrap">
-                  <div className="flex items-center gap-2">
-                    <h2 className="text-sm font-bold uppercase tracking-wider">Results</h2>
-                  </div>
+                  <h2 className="text-sm font-bold uppercase tracking-wider">Results</h2>
                   <span className="text-xs font-mono">
                     <b>{totalParts}</b> parts · <b>{results.length}</b> assemblies
                     {totalNew > 0
-                      ? <span className="text-accent font-bold ml-2">▲ {totalNew} new to load</span>
+                      ? <span className="text-[#ff473b] font-bold ml-2">▲ {totalNew} new to load</span>
                       : <span className="text-green-700 font-bold ml-2">✓ all in JDGEs</span>}
                   </span>
                 </div>
-                <div className="border-t-2 border-foreground">
+                <div className="border-t-2 border-[#262626]">
                   {results.map((result) => (
                     <ResultsSection key={result.assemblyPn} result={result}
                       expanded={expandedAssemblies.has(result.assemblyPn)}
@@ -578,26 +775,45 @@ export default function App() {
 
           {/* Right panel */}
           <div className="space-y-4">
+
+            {/* How it works */}
             <div className="border border-border p-4">
               <h3 className="text-xs font-bold uppercase tracking-wider mb-3 flex items-center gap-2">
                 <Database className="w-3.5 h-3.5" /> How it works
               </h3>
               <ol className="space-y-3 text-xs text-muted-foreground">
-                <li className="flex gap-2"><span className="font-mono font-bold text-foreground shrink-0">1.</span>Upload BOM files named after their part number. Both top-level and sub-assembly BOMs.</li>
-                <li className="flex gap-2"><span className="font-mono font-bold text-foreground shrink-0">2.</span>Upload the JDGEs dump. Parts found here are marked "in JDGEs."</li>
-                <li className="flex gap-2"><span className="font-mono font-bold text-foreground shrink-0">3.</span>Cross-check flags unlisted parts as <span className="text-accent font-semibold">NEW</span>. Sub-assemblies with their own BOM file get the <span className="bg-yellow-300 text-black px-0.5 text-[10px] font-bold">NEW Part / BOM</span> label.</li>
-                <li className="flex gap-2"><span className="font-mono font-bold text-foreground shrink-0">4.</span>Generate Excel creates one sheet per assembly — new parts section on top, full BOM below — plus extra sheets for each sub-assembly.</li>
+                <li className="flex gap-2">
+                  <span className="font-mono font-bold text-[#ff473b] shrink-0">01</span>
+                  <span><strong className="text-foreground">Upload your BOM files.</strong> Rename each spreadsheet to match its part number exactly (e.g. <span className="font-mono">RW9350.xlsx</span>). Upload both top-level assemblies and any sub-assembly BOMs — you can drop multiple files at once.</span>
+                </li>
+                <li className="flex gap-2">
+                  <span className="font-mono font-bold text-[#ff473b] shrink-0">02</span>
+                  <span><strong className="text-foreground">Upload your JDGEs dump.</strong> Export all existing part numbers from JDGEs as a spreadsheet. Every cell in the file is scanned — no specific column format required.</span>
+                </li>
+                <li className="flex gap-2">
+                  <span className="font-mono font-bold text-[#ff473b] shrink-0">03</span>
+                  <span><strong className="text-foreground">Cross-check.</strong> Each assembly PN and every part inside its BOM is compared against JDGEs. Parts not found are flagged: <span className="bg-[#ff473b] text-white px-1 font-bold text-[10px]">NEW BOM</span> for sub-assemblies with their own BOM file, <span className="bg-[#c2a68f] text-white px-1 font-bold text-[10px]">NEW Part</span> for regular new parts.</span>
+                </li>
+                <li className="flex gap-2">
+                  <span className="font-mono font-bold text-[#ff473b] shrink-0">04</span>
+                  <span><strong className="text-foreground">Set labour codes (optional).</strong> For each BOM you can choose a labour code (MT080, MT100, MT060) and quantity — this adds a row at the top of that BOM section in the output file.</span>
+                </li>
+                <li className="flex gap-2">
+                  <span className="font-mono font-bold text-[#ff473b] shrink-0">05</span>
+                  <span><strong className="text-foreground">Generate Excel.</strong> A single-sheet file is produced: all new parts at the top, then each BOM in ascending part number order. Type the filename before downloading. Dropdown validation is pre-set for P or M, Master Planning Family, Comms Class, and Sub Class.</span>
+                </li>
               </ol>
             </div>
 
+            {/* Output columns */}
             <div className="border border-border p-4">
               <h3 className="text-xs font-bold uppercase tracking-wider mb-2">Output columns</h3>
               <div className="space-y-2">
                 <div>
                   <p className="text-[10px] font-bold uppercase text-muted-foreground mb-1">New Parts section</p>
                   <div className="flex flex-wrap gap-1">
-                    {["Label", "Part No.", "Desc 1", "Desc 2", "Drawing Ref", "P or M", "Cost", "Supplier", "Lead-Time", "Mst.Plan.Family", "Comms Class", "Sub Class", "Unit", "Branch"].map((c) => (
-                      <span key={c} className="text-[10px] font-mono bg-yellow-100 border border-yellow-300 px-1 py-0.5">{c}</span>
+                    {["Label", "Part No.", "Desc 1", "Desc 2", "Drawing Ref", "P or M ▾", "Cost", "Supplier", "Lead-Time", "Mst.Plan.Family ▾", "Comms Class ▾", "Sub Class ▾", "Unit", "Branch"].map((c) => (
+                      <span key={c} className={`text-[10px] font-mono px-1 py-0.5 ${c.endsWith("▾") ? "bg-[#ff473b]/15 border border-[#ff473b]/40 text-[#ff473b] font-bold" : "bg-[#c2a68f]/20 border border-[#c2a68f]/50"}`}>{c}</span>
                     ))}
                   </div>
                 </div>
@@ -609,35 +825,41 @@ export default function App() {
                     ))}
                   </div>
                 </div>
+                <p className="text-[10px] text-muted-foreground">Drawing Ref is always set to match Part No.</p>
               </div>
             </div>
 
+            {/* Summary */}
             {results.length > 0 && (
               <div className="border border-border p-4">
                 <h3 className="text-xs font-bold uppercase tracking-wider mb-3">Summary</h3>
                 <div className="space-y-1.5">
-                  {results.map((r) => (
-                    <div key={r.assemblyPn} className="flex items-center justify-between text-xs font-mono">
-                      <span className="font-semibold truncate max-w-[130px]">{r.assemblyPn}</span>
-                      <div className="flex gap-2 items-center">
-                        <span className="text-muted-foreground">{r.bomRows.length}</span>
-                        {r.newParts.length > 0
-                          ? <span className="text-accent font-bold">{r.newParts.length} new</span>
-                          : <span className="text-green-700">✓</span>}
+                  {results.map((r) => {
+                    const newCount = r.newParts.length + (r.assemblyIsNew ? 1 : 0);
+                    return (
+                      <div key={r.assemblyPn} className="grid grid-cols-[1fr_auto_auto] gap-2 items-center text-xs font-mono">
+                        <span className="font-semibold">{r.assemblyPn}</span>
+                        <span className="text-muted-foreground text-right">{r.bomRows.length}</span>
+                        {newCount > 0
+                          ? <span className="text-[#ff473b] font-bold text-right w-14">{newCount} new</span>
+                          : <span className="text-green-700 text-right w-14">✓</span>}
                       </div>
-                    </div>
-                  ))}
-                  <div className="border-t border-border pt-1.5 flex items-center justify-between text-xs font-mono font-bold">
+                    );
+                  })}
+                  <div className="border-t border-border pt-1.5 grid grid-cols-[1fr_auto_auto] gap-2 items-center text-xs font-mono font-bold">
                     <span>TOTAL</span>
-                    <span>{totalParts} · {totalNew > 0 ? <span className="text-accent">{totalNew} new</span> : "all loaded"}</span>
+                    <span className="text-right">{totalParts}</span>
+                    <span className={`text-right w-14 ${totalNew > 0 ? "text-[#ff473b]" : "text-green-700"}`}>
+                      {totalNew > 0 ? `${totalNew} new` : "✓"}
+                    </span>
                   </div>
                 </div>
               </div>
             )}
 
             {(bomFiles.length > 0 || jdgesLoaded) && (
-              <button onClick={() => { setBomFiles([]); setJdgesFile(null); setJdgesLoaded(false); setJdgesPartNumbers(new Set()); setJdgesCount(0); setResults([]); setError(null); }}
-                className="w-full flex items-center justify-center gap-2 border border-border py-2 text-xs font-mono text-muted-foreground hover:border-destructive hover:text-destructive transition-colors">
+              <button onClick={handleReset}
+                className="w-full flex items-center justify-center gap-2 border border-border py-2 text-xs font-mono text-muted-foreground hover:border-[#ff473b] hover:text-[#ff473b] transition-colors">
                 <Trash2 className="w-3.5 h-3.5" />Reset all
               </button>
             )}
