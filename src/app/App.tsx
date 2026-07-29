@@ -186,8 +186,10 @@ async function generateOutputExcel(
   const newFill:    ExcelJS.Fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFC2A68F" } };
   const labourFill: ExcelJS.Fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FFE8E5DE" } };
   const boldWhite: Partial<ExcelJS.Font> = { bold: true, size: 10, color: { argb: "FFFFFFFF" } };
+  const specialboldWhite: Partial<ExcelJS.Font> = { bold: true, size: 14, color: { argb: "FFFFFFFF" } };
   const boldDark:  Partial<ExcelJS.Font> = { bold: true, size: 10 };
   const baseFont:  Partial<ExcelJS.Font> = { size: 10 };
+  
 
   const newPartDataRows: number[] = [];
 
@@ -263,11 +265,11 @@ async function generateOutputExcel(
     // Assembly PN label row
     const asmRow = ws.addRow([originalPn]);
     asmRow.getCell(1).fill = newBomheaderFill;
-    asmRow.getCell(1).font = boldWhite;
+    asmRow.getCell(1).font = specialboldWhite;
 
     // BOM column headers
     const bomHdrRow = ws.addRow(BOM_HEADERS);
-    bomHdrRow.font = boldWhite;
+    bomHdrRow.font = specialboldWhite;
     bomHdrRow.fill = newBomheaderFill;
     bomHdrRow.alignment = { wrapText: true, vertical: "middle" };
 
