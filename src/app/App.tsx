@@ -269,8 +269,8 @@ async function generateOutputExcel(
 
     // BOM column headers
     const bomHdrRow = ws.addRow(BOM_HEADERS);
-    bomHdrRow.font = specialboldWhite;
-    bomHdrRow.fill = newBomheaderFill;
+    bomHdrRow.font = boldWhite;
+    bomHdrRow.fill = headerFill;
     bomHdrRow.alignment = { wrapText: true, vertical: "middle" };
 
     // Labour code row (if set for this BOM)
